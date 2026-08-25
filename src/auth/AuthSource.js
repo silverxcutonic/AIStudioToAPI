@@ -14,7 +14,7 @@ const path = require("path");
  * Responsible for loading and managing authentication information from the file system
  */
 class AuthSource {
-    constructor(logger) {
+    constructor(logger, initialFolder = null) {
         this.logger = logger;
         this.authMode = "file";
         this.availableIndices = [];
@@ -32,15 +32,129 @@ class AuthSource {
         this.duplicateGroups = [];
         this.lastScannedIndices = "[]"; // Cache to track changes
 
-        this.logger.info('[Auth] Using files in "configs/auth/" directory for authentication.');
+        // Determine active auth folder (e.g. "auth1", "auth2", or "auth")
+        this.activeFolder = this._determineInitialFolder(initialFolder);
+
+        this.logger.info(`[Auth] Using active folder "configs/${this.activeFolder}/" for authentication.`);
 
         this.reloadAuthSources(true); // Initial load
 
         if (this.availableIndices.length === 0) {
             this.logger.warn(
-                `[Auth] No valid authentication sources found in 'file' mode. The server will start in account binding mode.`
+                `[Auth] No valid authentication sources found in 'configs/${this.activeFolder}/'. The server will start in account binding mode.`
             );
         }
+    }
+
+    _determineInitialFolder(initialFolder) {
+        if (initialFolder && typeof initialFolder === "string" && this._isValidFolderName(initialFolder)) {
+            return initialFolder.trim();
+        }
+
+        const envFolder = process.env.ACTIVE_AUTH_FOLDER;
+        if (envFolder && typeof envFolder === "string" && this._isValidFolderName(envFolder)) {
+            return envFolder.trim();
+        }
+
+        // If configs/auth1 exists, prefer auth1; otherwise if configs/auth exists, use auth; default to auth1
+        const configsDir = path.join(process.cwd(), "configs");
+        if (fs.existsSync(path.join(configsDir, "auth1"))) {
+            return "auth1";
+        }
+        if (fs.existsSync(path.join(configsDir, "auth"))) {
+            return "auth";
+        }
+        return "auth1";
+    }
+
+    _isValidFolderName(folderName) {
+        return /^[a-zA-Z0-9_-]+$/.test(folderName);
+    }
+
+    getAuthDir(folderName = this.activeFolder) {
+        const safeFolder = this._isValidFolderName(folderName) ? folderName : this.activeFolder;
+        return path.join(process.cwd(), "configs", safeFolder);
+    }
+
+    getAuthFilePath(index, folderName = this.activeFolder) {
+        return path.join(this.getAuthDir(folderName), `auth-${index}.json`);
+    }
+
+    listAvailableFolders() {
+        const configsDir = path.join(process.cwd(), "configs");
+        if (!fs.existsSync(configsDir)) {
+            return [{ accountCount: 0, isActive: true, name: this.activeFolder }];
+        }
+
+        try {
+            const entries = fs.readdirSync(configsDir, { withFileTypes: true });
+            const folders = entries
+                .filter(entry => entry.isDirectory() && this._isValidFolderName(entry.name))
+                .map(entry => {
+                    const folderDir = path.join(configsDir, entry.name);
+                    let accountCount = 0;
+                    try {
+                        const files = fs.readdirSync(folderDir);
+                        accountCount = files.filter(f => /^auth-\d+\.json$/.test(f)).length;
+                    } catch (e) {
+                        accountCount = 0;
+                    }
+                    return {
+                        accountCount,
+                        isActive: entry.name === this.activeFolder,
+                        name: entry.name,
+                    };
+                });
+
+            // Ensure current activeFolder is included even if directory is empty or not yet created on disk
+            if (!folders.some(f => f.name === this.activeFolder)) {
+                folders.push({
+                    accountCount: this.availableIndices.length,
+                    isActive: true,
+                    name: this.activeFolder,
+                });
+            }
+
+            // Sort folders naturally: auth, auth1, auth2, etc.
+            folders.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+            return folders;
+        } catch (error) {
+            this.logger.error(`[Auth] Failed to list auth folders: ${error.message}`);
+            return [{ accountCount: this.availableIndices.length, isActive: true, name: this.activeFolder }];
+        }
+    }
+
+    createFolder(folderName) {
+        if (!folderName || typeof folderName !== "string" || !this._isValidFolderName(folderName)) {
+            throw new Error(
+                `Invalid folder name: "${folderName}". Only alphanumeric characters, dashes and underscores are allowed.`
+            );
+        }
+
+        const targetDir = this.getAuthDir(folderName);
+        if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+            this.logger.info(`[Auth] Created new auth folder: configs/${folderName}`);
+        }
+        return { created: true, name: folderName };
+    }
+
+    setActiveFolder(folderName) {
+        if (!folderName || typeof folderName !== "string" || !this._isValidFolderName(folderName)) {
+            throw new Error(`Invalid folder name: "${folderName}"`);
+        }
+
+        const trimmed = folderName.trim();
+        if (this.activeFolder === trimmed) {
+            return { changed: false, folder: this.activeFolder };
+        }
+
+        this.logger.info(`[Auth] 🗂️ Switching active auth folder from "${this.activeFolder}" to "${trimmed}"`);
+        this.activeFolder = trimmed;
+        this.lastScannedIndices = "[]"; // Force reload
+        this.reloadAuthSources(true);
+
+        return { changed: true, folder: this.activeFolder };
     }
 
     reloadAuthSources(isInitialLoad = false) {
@@ -61,20 +175,24 @@ class AuthSource {
         return false; // No changes
     }
 
-    removeAuth(index) {
+    removeAuth(index, folderName = this.activeFolder) {
         if (!Number.isInteger(index)) {
             throw new Error("Invalid account index.");
         }
 
-        const authFilePath = path.join(process.cwd(), "configs", "auth", `auth-${index}.json`);
+        const authFilePath = this.getAuthFilePath(index, folderName);
         if (!fs.existsSync(authFilePath)) {
-            throw new Error(`Auth file for account #${index} does not exist.`);
+            throw new Error(`Auth file for account #${index} does not exist in folder "${folderName}".`);
         }
 
         try {
             fs.unlinkSync(authFilePath);
         } catch (error) {
             throw new Error(`Failed to delete auth file for account #${index}: ${error.message}`);
+        }
+
+        if (folderName === this.activeFolder) {
+            this.reloadAuthSources(true);
         }
 
         return {
@@ -85,7 +203,7 @@ class AuthSource {
 
     _discoverAvailableIndices() {
         let indices = [];
-        const configDir = path.join(process.cwd(), "configs", "auth");
+        const configDir = this.getAuthDir();
         if (!fs.existsSync(configDir)) {
             this.availableIndices = [];
             this.initialIndices = [];
@@ -96,7 +214,7 @@ class AuthSource {
             const authFiles = files.filter(file => /^auth-\d+\.json$/.test(file));
             indices = authFiles.map(file => parseInt(file.match(/^auth-(\d+)\.json$/)[1], 10));
         } catch (error) {
-            this.logger.error(`[Auth] Failed to scan "configs/auth/" directory: ${error.message}`);
+            this.logger.error(`[Auth] Failed to scan "configs/${this.activeFolder}/" directory: ${error.message}`);
             this.availableIndices = [];
             this.initialIndices = [];
             return;
@@ -236,7 +354,7 @@ class AuthSource {
     }
 
     _getAuthContent(index) {
-        const authFilePath = path.join(process.cwd(), "configs", "auth", `auth-${index}.json`);
+        const authFilePath = this.getAuthFilePath(index);
         if (!fs.existsSync(authFilePath)) return null;
         try {
             return fs.readFileSync(authFilePath, "utf-8");
@@ -302,7 +420,7 @@ class AuthSource {
             return false;
         }
 
-        const authFilePath = path.join(process.cwd(), "configs", "auth", `auth-${index}.json`);
+        const authFilePath = this.getAuthFilePath(index);
         try {
             const fileContent = await fsPromises.readFile(authFilePath, "utf-8");
             const authData = JSON.parse(fileContent);
@@ -315,7 +433,7 @@ class AuthSource {
             // This will properly rebuild canonicalIndexMap and handle duplicate relationships
             this._buildRotationIndices();
 
-            this.logger.warn(`[Auth] ⏰ Marked auth #${index} as expired`);
+            this.logger.warn(`[Auth] ⏰ Marked auth #${index} in "${this.activeFolder}" as expired`);
             return true;
         } catch (error) {
             this.logger.error(`[Auth] Failed to mark auth #${index} as expired: ${error.message}`);
@@ -327,7 +445,7 @@ class AuthSource {
      * Unmark an auth as expired (restore it to active status)
      *
      * Side effects:
-     * - Removes "expired" field from the auth file (configs/auth/auth-{index}.json)
+     * - Removes "expired" field from the auth file (configs/{activeFolder}/auth-{index}.json)
      * - Removes index from this.expiredIndices array
      * - Rebuilds rotation indices (calls this._buildRotationIndices()) to include the restored account in rotation
      * - Updates canonicalIndexMap to reflect the new rotation state
@@ -346,7 +464,7 @@ class AuthSource {
             return false;
         }
 
-        const authFilePath = path.join(process.cwd(), "configs", "auth", `auth-${index}.json`);
+        const authFilePath = this.getAuthFilePath(index);
         try {
             const fileContent = await fsPromises.readFile(authFilePath, "utf-8");
             const authData = JSON.parse(fileContent);
@@ -358,7 +476,7 @@ class AuthSource {
             // Rebuild rotation indices to include this restored account
             this._buildRotationIndices();
 
-            this.logger.info(`[Auth] ✅ Restored auth #${index} from expired status`);
+            this.logger.info(`[Auth] ✅ Restored auth #${index} in "${this.activeFolder}" from expired status`);
             return true;
         } catch (error) {
             this.logger.error(`[Auth] Failed to restore auth #${index}: ${error.message}`);

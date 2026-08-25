@@ -247,6 +247,69 @@ class StatusRoutes {
             }
         });
 
+        // ================= Folder Management Routes =================
+        // List all auth folders
+        app.get("/api/folders", isAuthenticated, (req, res) => {
+            try {
+                const folders = this.serverSystem.authSource.listAvailableFolders();
+                res.status(200).json({
+                    activeFolder: this.serverSystem.authSource.activeFolder,
+                    folders,
+                });
+            } catch (error) {
+                this.logger.error(`[WebUI] Failed to list folders: ${error.message}`);
+                res.status(500).json({ error: error.message });
+            }
+        });
+
+        // Create a new auth folder
+        app.post("/api/folders", isAuthenticated, (req, res) => {
+            try {
+                const { name } = req.body;
+                if (!name || typeof name !== "string") {
+                    return res.status(400).json({ error: "Folder name is required." });
+                }
+                const result = this.serverSystem.authSource.createFolder(name.trim());
+                res.status(200).json({
+                    folder: result.name,
+                    folders: this.serverSystem.authSource.listAvailableFolders(),
+                    message: "folderCreatedSuccess",
+                });
+            } catch (error) {
+                this.logger.error(`[WebUI] Failed to create folder: ${error.message}`);
+                res.status(400).json({ error: error.message });
+            }
+        });
+
+        // Switch active auth folder
+        app.put("/api/folders/active", isAuthenticated, async (req, res) => {
+            try {
+                if (this._rejectIfSystemBusy(res)) return;
+
+                const { folder, targetIndex } = req.body;
+                if (!folder || typeof folder !== "string") {
+                    return res.status(400).json({ error: "Target folder is required." });
+                }
+
+                this.logger.info(`[WebUI] Received request to switch active folder to "${folder}"...`);
+                const result = await this.serverSystem.requestHandler.switchFolder(folder.trim(), targetIndex);
+
+                if (result.success) {
+                    res.status(200).json({
+                        activeFolder: result.folder,
+                        message: "folderSwitchSuccess",
+                        newIndex: result.newIndex,
+                        totalAccounts: result.totalAccounts,
+                    });
+                } else {
+                    res.status(409).json({ message: "folderSwitchFailed", reason: result.reason });
+                }
+            } catch (error) {
+                this.logger.error(`[WebUI] Folder switch failed: ${error.message}`);
+                res.status(500).json({ error: error.message, message: "folderSwitchFatal" });
+            }
+        });
+
         app.put("/api/accounts/current", isAuthenticated, async (req, res) => {
             try {
                 if (this._rejectIfSystemBusy(res)) return;
@@ -550,13 +613,11 @@ class StatusRoutes {
                 });
             }
 
-            const configDir = path.join(process.cwd(), "configs", "auth");
-
             try {
                 // Pre-calculate valid files to archive
                 const filesToArchive = [];
                 for (const idx of validIndices) {
-                    const filePath = path.join(configDir, `auth-${idx}.json`);
+                    const filePath = this.serverSystem.authSource.getAuthFilePath(idx);
                     if (fs.existsSync(filePath)) {
                         filesToArchive.push({ filePath, name: `auth-${idx}.json` });
                     }
@@ -751,6 +812,13 @@ class StatusRoutes {
             res.status(200).json({ message: "settingUpdateSuccess", setting: "checkUpdate", value: statusText });
         });
 
+        app.put("/api/settings/auto-switch-folders", isAuthenticated, (req, res) => {
+            this.config.autoSwitchFolders = !this.config.autoSwitchFolders;
+            const statusText = this.config.autoSwitchFolders;
+            this.logger.info(`[WebUI] Auto-switch folders on exhaustion switched to: ${statusText}`);
+            res.status(200).json({ message: "settingUpdateSuccess", setting: "autoSwitchFolders", value: statusText });
+        });
+
         app.put("/api/settings/enable-auth-update", isAuthenticated, (req, res) => {
             this.config.enableAuthUpdate = !this.config.enableAuthUpdate;
             const statusText = this.config.enableAuthUpdate;
@@ -828,7 +896,8 @@ class StatusRoutes {
                 await this.serverSystem.browserManager.abortBackgroundPreload();
 
                 // Ensure directory exists
-                const configDir = path.join(process.cwd(), "configs", "auth");
+                const targetFolder = req.body.folder || this.serverSystem.authSource.activeFolder;
+                const configDir = this.serverSystem.authSource.getAuthDir(targetFolder);
                 if (!fs.existsSync(configDir)) {
                     fs.mkdirSync(configDir, { recursive: true });
                 }
@@ -837,8 +906,17 @@ class StatusRoutes {
                 const fileContent = typeof content === "object" ? JSON.stringify(content, null, 2) : content;
 
                 // Always use max index + 1 to ensure new auth is always the latest
-                // This simplifies dedup logic assumption: higher index = newer auth
-                const existingIndices = this.serverSystem.authSource.availableIndices || [];
+                // Look for existing indices in target folder
+                let existingIndices = [];
+                try {
+                    const files = fs.readdirSync(configDir);
+                    existingIndices = files
+                        .filter(file => /^auth-\d+\.json$/.test(file))
+                        .map(file => parseInt(file.match(/^auth-(\d+)\.json$/)[1], 10));
+                } catch (e) {
+                    existingIndices = [];
+                }
+
                 const nextAuthIndex = existingIndices.length > 0 ? Math.max(...existingIndices) + 1 : 0;
 
                 const newFilename = `auth-${nextAuthIndex}.json`;
@@ -846,16 +924,22 @@ class StatusRoutes {
 
                 await fs.promises.writeFile(filePath, fileContent);
 
-                // Reload auth sources to pick up changes
-                this.serverSystem.authSource.reloadAuthSources();
+                // Reload auth sources if target folder is the active folder
+                if (targetFolder === this.serverSystem.authSource.activeFolder) {
+                    this.serverSystem.authSource.reloadAuthSources();
 
-                // Rebalance context pool to pick up new account
-                this.serverSystem.browserManager.rebalanceContextPool().catch(err => {
-                    this.logger.error(`[Auth] Background rebalance failed: ${err.message}`);
+                    // Rebalance context pool to pick up new account
+                    this.serverSystem.browserManager.rebalanceContextPool().catch(err => {
+                        this.logger.error(`[Auth] Background rebalance failed: ${err.message}`);
+                    });
+                }
+
+                this.logger.info(`[WebUI] File uploaded to "${targetFolder}": generated ${newFilename}`);
+                res.status(200).json({
+                    filename: newFilename,
+                    folder: targetFolder,
+                    message: "File uploaded successfully",
                 });
-
-                this.logger.info(`[WebUI] File uploaded via API: generated ${newFilename}`);
-                res.status(200).json({ filename: newFilename, message: "File uploaded successfully" });
             } catch (error) {
                 this.logger.error(`[WebUI] Failed to write file: ${error.message}`);
                 res.status(500).json({ error: "Failed to save file" });
@@ -866,7 +950,7 @@ class StatusRoutes {
         app.post("/api/files/batch", isAuthenticated, async (req, res) => {
             if (this._rejectIfSystemBusy(res)) return;
 
-            const { files } = req.body;
+            const { files, folder } = req.body;
 
             if (!Array.isArray(files) || files.length === 0) {
                 return res.status(400).json({ error: "Missing files array" });
@@ -874,86 +958,74 @@ class StatusRoutes {
 
             try {
                 // Abort any ongoing background preload task before batch upload
-                // This prevents race conditions where background tasks continue initializing contexts
-                // while we're adding multiple new accounts
                 await this.serverSystem.browserManager.abortBackgroundPreload();
 
                 // Ensure directory exists
-                const configDir = path.join(process.cwd(), "configs", "auth");
+                const targetFolder = folder || this.serverSystem.authSource.activeFolder;
+                const configDir = this.serverSystem.authSource.getAuthDir(targetFolder);
                 if (!fs.existsSync(configDir)) {
                     fs.mkdirSync(configDir, { recursive: true });
                 }
 
                 const results = [];
 
-                // Get starting index
-                const existingIndices = this.serverSystem.authSource.availableIndices || [];
-                let nextAuthIndex = existingIndices.length > 0 ? Math.max(...existingIndices) + 1 : 0;
+                // Get starting index for target folder
+                let existingIndices = [];
+                try {
+                    const dirFiles = fs.readdirSync(configDir);
+                    existingIndices = dirFiles
+                        .filter(file => /^auth-\d+\.json$/.test(file))
+                        .map(file => parseInt(file.match(/^auth-(\d+)\.json$/)[1], 10));
+                } catch (e) {
+                    existingIndices = [];
+                }
+                let currentIndex = existingIndices.length > 0 ? Math.max(...existingIndices) + 1 : 0;
 
-                // Write all files first, track each file's result
                 for (let i = 0; i < files.length; i++) {
-                    const content = files[i];
+                    const item = files[i];
+                    const content = item.content || item;
+                    const fileContent = typeof content === "object" ? JSON.stringify(content, null, 2) : content;
 
-                    if (!content) {
-                        results.push({ error: "Missing content", index: i, success: false });
-                        continue;
-                    }
+                    const newFilename = `auth-${currentIndex}.json`;
+                    const filePath = path.join(configDir, newFilename);
 
-                    try {
-                        // If content is object, stringify it
-                        const fileContent = typeof content === "object" ? JSON.stringify(content, null, 2) : content;
-
-                        const newFilename = `auth-${nextAuthIndex}.json`;
-                        const filePath = path.join(configDir, newFilename);
-
-                        await fs.promises.writeFile(filePath, fileContent);
-
-                        results.push({ filename: newFilename, index: i, success: true });
-                        this.logger.info(`[WebUI] Batch upload: generated ${newFilename}`);
-
-                        nextAuthIndex++;
-                    } catch (error) {
-                        results.push({ error: error.message, index: i, success: false });
-                        this.logger.error(`[WebUI] Batch upload failed for file ${i}: ${error.message}`);
-                    }
+                    await fs.promises.writeFile(filePath, fileContent);
+                    results.push({ filename: newFilename, index: currentIndex, originalIndex: i });
+                    currentIndex++;
                 }
 
-                // Only reload and rebalance once after all files are written
-                const successCount = results.filter(r => r.success).length;
-                if (successCount > 0) {
+                // Reload auth sources if target folder is the active folder
+                if (targetFolder === this.serverSystem.authSource.activeFolder) {
                     this.serverSystem.authSource.reloadAuthSources();
+
+                    // Rebalance context pool to pick up new accounts
                     this.serverSystem.browserManager.rebalanceContextPool().catch(err => {
                         this.logger.error(`[Auth] Background rebalance failed: ${err.message}`);
                     });
                 }
 
-                const failureCount = results.length - successCount;
-                if (failureCount > 0) {
-                    return res.status(207).json({
-                        message: "Batch upload partially successful",
-                        results,
-                        successCount,
-                    });
-                }
-
-                res.status(200).json({
+                const successCount = results.length;
+                this.logger.info(`[WebUI] Batch upload completed: ${successCount} files saved to "${targetFolder}".`);
+                return res.status(200).json({
+                    folder: targetFolder,
                     message: "Batch upload successful",
                     results,
                     successCount,
                 });
             } catch (error) {
                 this.logger.error(`[WebUI] Batch upload failed: ${error.message}`);
-                res.status(500).json({ error: "Failed to upload files" });
+                return res.status(500).json({ error: "Failed to upload files" });
             }
         });
 
         app.get("/api/files/:filename", isAuthenticated, (req, res) => {
             const filename = req.params.filename;
+            const folder = req.query.folder || this.serverSystem.authSource.activeFolder;
             // Security check
             if (!/^[a-zA-Z0-9.-]+$/.test(filename) || filename.includes("..")) {
                 return res.status(400).json({ error: "Invalid filename" });
             }
-            const filePath = path.join(process.cwd(), "configs", "auth", filename);
+            const filePath = path.join(this.serverSystem.authSource.getAuthDir(folder), filename);
             if (!fs.existsSync(filePath)) {
                 return res.status(404).json({ error: "File not found" });
             }
@@ -988,6 +1060,8 @@ class StatusRoutes {
 
         const currentAuthIndex = requestHandler.currentAuthIndex;
         const currentAccountName = accountNameMap.get(currentAuthIndex) || "N/A";
+        const availableFolders = authSource.listAvailableFolders();
+        const activeAuthFolder = authSource.activeFolder;
 
         const usageCount =
             config.switchOnUses > 0
@@ -1004,8 +1078,11 @@ class StatusRoutes {
             logs: displayLogs.join("\n"),
             status: {
                 accountDetails,
+                activeAuthFolder,
                 activeContextsCount: browserManager.contexts.size,
                 apiKeySource: config.apiKeySource,
+                autoSwitchFolders: config.autoSwitchFolders,
+                availableFolders,
                 browserConnected: !!this.serverSystem.connectionRegistry.getConnectionByAuth(currentAuthIndex, false),
                 checkUpdate: config.checkUpdate,
                 currentAccountName,

@@ -454,8 +454,7 @@ class BrowserManager {
         }
 
         try {
-            const configDir = path.join(process.cwd(), "configs", "auth");
-            const authFilePath = path.join(configDir, `auth-${authIndex}.json`);
+            const authFilePath = this.authSource.getAuthFilePath(authIndex);
 
             // Read original file content to preserve all fields (e.g. accountName, custom fields)
             // Relies on AuthSource validation (checks valid index AND file existence)
@@ -486,10 +485,38 @@ class BrowserManager {
     }
 
     /**
-     * Get pool target indices based on current account and rotation order
-     * @param {number} maxContexts - Max pool size (0 = unlimited)
-     * @returns {number[]} Target indices for the pool
+     * Tear down all browser contexts when switching folders
      */
+    async closeAllContextsForFolderSwitch() {
+        this.logger.info("[Browser] 🗂️ Closing all active contexts for folder switch...");
+        await this.abortBackgroundPreload();
+
+        // Clear all health monitor intervals
+        for (const ctxData of this.contexts.values()) {
+            if (ctxData.healthMonitorInterval) {
+                clearInterval(ctxData.healthMonitorInterval);
+                ctxData.healthMonitorInterval = null;
+            }
+        }
+
+        const closePromises = [];
+        for (const authIndex of [...this.contexts.keys()]) {
+            closePromises.push(
+                this.closeContext(authIndex).catch(err => {
+                    this.logger.error(
+                        `[Browser] Error closing context #${authIndex} during folder switch: ${err.message}`
+                    );
+                })
+            );
+        }
+
+        await Promise.all(closePromises);
+        this.contexts.clear();
+        this._currentAuthIndex = -1;
+        this.context = null;
+        this.page = null;
+        this.logger.info("[Browser] ✅ All contexts closed for folder switch.");
+    }
     // _getPoolTargetIndices(maxContexts) {
     //     const rotation = this.authSource.getRotationIndices();
     //     if (rotation.length === 0) return [];

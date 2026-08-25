@@ -268,6 +268,43 @@
                                         stroke-linejoin="round"
                                         style="margin-right: 6px; vertical-align: middle"
                                     >
+                                        <path
+                                            d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+                                        ></path>
+                                    </svg>
+                                    {{ t("activeAuthFolder") }}
+                                </span>
+                                <span class="value account-value">
+                                    <el-select
+                                        v-model="state.activeAuthFolder"
+                                        size="small"
+                                        style="width: 140px"
+                                        :disabled="isBusy"
+                                        @change="switchFolderByName"
+                                    >
+                                        <el-option
+                                            v-for="f in state.availableFolders"
+                                            :key="f.name"
+                                            :label="`${f.name} (${f.accountCount})`"
+                                            :value="f.name"
+                                        />
+                                    </el-select>
+                                </span>
+                            </div>
+                            <div class="status-item">
+                                <span class="label">
+                                    <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        style="margin-right: 6px; vertical-align: middle"
+                                    >
                                         <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
                                         <circle cx="8.5" cy="7" r="4"></circle>
                                         <polyline points="17 11 19 13 23 9"></polyline>
@@ -736,6 +773,25 @@
                             </div>
                             <!-- Right: Add, upload, and deduplicate -->
                             <div class="icon-buttons">
+                                <button :disabled="isBusy" :title="t('authFolderCreate')" @click="createAuthFolder">
+                                    <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        width="20"
+                                        height="20"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                    >
+                                        <path
+                                            d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+                                        ></path>
+                                        <line x1="12" y1="11" x2="12" y2="17"></line>
+                                        <line x1="9" y1="14" x2="15" y2="14"></line>
+                                    </svg>
+                                </button>
                                 <button :disabled="isBusy" :title="t('btnAddUser')" @click="addUser">
                                     <svg
                                         xmlns="http://www.w3.org/2000/svg"
@@ -1204,6 +1260,35 @@
                                     v-model="state.enableAuthUpdateEnabled"
                                     :width="50"
                                     :before-change="handleEnableAuthUpdateBeforeChange"
+                                />
+                            </div>
+                            <div class="switch-container">
+                                <span class="label">
+                                    <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        style="margin-right: 6px; vertical-align: middle"
+                                    >
+                                        <path
+                                            d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+                                        ></path>
+                                    </svg>
+                                    <span>
+                                        {{ t("autoSwitchFolders") }}
+                                        <EnvVarTooltip env-var="AUTO_SWITCH_FOLDERS" doc-section="proxy-config" />
+                                    </span>
+                                </span>
+                                <el-switch
+                                    v-model="state.autoSwitchFoldersEnabled"
+                                    :width="50"
+                                    :before-change="handleAutoSwitchFoldersBeforeChange"
                                 />
                             </div>
                         </div>
@@ -3697,8 +3782,11 @@ const { theme, setTheme } = useTheme();
 
 const state = reactive({
     accountDetails: [],
+    activeAuthFolder: "auth1",
     activeContextsCount: 0,
     apiKeySource: "",
+    autoSwitchFoldersEnabled: true,
+    availableFolders: [],
     browserConnected: false,
     checkUpdateEnabled: true,
     currentAuthIndex: -1,
@@ -4360,6 +4448,74 @@ const handleStreamingModeBeforeChange = async () => {
     }
 };
 
+const handleAutoSwitchFoldersBeforeChange = () =>
+    handleSettingChange("/api/settings/auto-switch-folders", "autoSwitchFolders");
+
+// Switch folder by name
+const switchFolderByName = async targetFolder => {
+    if (!targetFolder) {
+        return;
+    }
+
+    const notification = ElNotification({
+        duration: 0,
+        message: t("switchingAccountNotice"),
+        title: t("warningTitle"),
+        type: "warning",
+    });
+    state.isSwitchingAccount = true;
+    try {
+        const res = await fetch("/api/folders/active", {
+            body: JSON.stringify({ folder: targetFolder }),
+            headers: { "Content-Type": "application/json" },
+            method: "PUT",
+        });
+        const data = await res.json();
+        const message = t(data.message, data);
+        if (res.ok) {
+            ElMessage.success(message);
+        } else {
+            ElMessage.error(message);
+        }
+    } catch (err) {
+        ElMessage.error(t("settingFailed", { message: err.message || err }));
+    } finally {
+        state.isSwitchingAccount = false;
+        notification.close();
+        updateContent();
+    }
+};
+
+// Create new auth folder
+const createAuthFolder = () => {
+    ElMessageBox.prompt(t("authFolderCreatePrompt"), t("authFolderCreate"), {
+        cancelButtonText: t("cancel"),
+        confirmButtonText: t("ok"),
+        inputErrorMessage: "Invalid folder name (letters, numbers, underscore, hyphen only)",
+        inputPattern: /^[a-zA-Z0-9_-]+$/,
+    })
+        .then(async ({ value }) => {
+            if (!value) return;
+            try {
+                const res = await fetch("/api/folders", {
+                    body: JSON.stringify({ name: value.trim() }),
+                    headers: { "Content-Type": "application/json" },
+                    method: "POST",
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    ElMessage.success(t("authFolderCreateSuccess"));
+                    updateContent();
+                } else {
+                    ElMessage.error(data.error || t("settingFailed", { message: "error" }));
+                }
+            } catch (err) {
+                ElMessage.error(t("settingFailed", { message: err.message || err }));
+            }
+        })
+        .catch(() => {});
+};
+
 // Switch account by index
 const switchAccountByIndex = targetIndex => {
     if (state.currentAuthIndex === targetIndex) {
@@ -4435,6 +4591,9 @@ const updateStatus = data => {
     };
 
     state.isUpdating = true;
+    state.activeAuthFolder = data.status.activeAuthFolder || "auth1";
+    state.availableFolders = data.status.availableFolders || [];
+    state.autoSwitchFoldersEnabled = isEnabled(data.status.autoSwitchFolders);
     state.checkUpdateEnabled = isEnabled(data.status.checkUpdate);
     state.streamingModeReal = data.status.streamingMode === "real";
     state.enableAuthUpdateEnabled = isEnabled(data.status.enableAuthUpdate);
@@ -4555,7 +4714,7 @@ const handleFileUpload = async event => {
 
             try {
                 const res = await fetch("/api/files", {
-                    body: JSON.stringify({ content: parsed }),
+                    body: JSON.stringify({ content: parsed, folder: state.activeAuthFolder }),
                     headers: { "Content-Type": "application/json" },
                     method: "POST",
                 });
@@ -4675,7 +4834,10 @@ const handleFileUpload = async event => {
             if (parsedFiles.length > 0) {
                 try {
                     const res = await fetch("/api/files/batch", {
-                        body: JSON.stringify({ files: parsedFiles.map(f => f.content) }),
+                        body: JSON.stringify({
+                            files: parsedFiles.map(f => f.content),
+                            folder: state.activeAuthFolder,
+                        }),
                         headers: { "Content-Type": "application/json" },
                         method: "POST",
                     });

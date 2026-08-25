@@ -6,7 +6,6 @@
  */
 
 const fs = require("fs");
-const path = require("path");
 const net = require("net");
 const { spawn } = require("child_process");
 
@@ -498,7 +497,7 @@ class CreateAuth {
             const storageState = await context.storageState();
             const authData = { ...storageState, accountName };
 
-            const configDir = path.join(process.cwd(), "configs", "auth");
+            const configDir = this.serverSystem.authSource.getAuthDir();
             if (!fs.existsSync(configDir)) {
                 fs.mkdirSync(configDir, { recursive: true });
             }
@@ -508,7 +507,7 @@ class CreateAuth {
             const existingIndices = this.serverSystem.authSource.availableIndices || [];
             const nextAuthIndex = existingIndices.length > 0 ? Math.max(...existingIndices) + 1 : 0;
 
-            const newAuthFilePath = path.join(configDir, `auth-${nextAuthIndex}.json`);
+            const newAuthFilePath = this.serverSystem.authSource.getAuthFilePath(nextAuthIndex);
             fs.writeFileSync(newAuthFilePath, JSON.stringify(authData, null, 2));
 
             this.logger.info(`[VNC] Saved new auth file: ${newAuthFilePath}`);

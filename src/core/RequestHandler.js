@@ -238,6 +238,14 @@ class RequestHandler {
         return this.authSwitcher.switchToSpecificAuth(targetIndex);
     }
 
+    async switchFolder(folderName, targetIndex = null) {
+        return this.authSwitcher.switchFolder(folderName, targetIndex);
+    }
+
+    async switchToNextFolder() {
+        return this.authSwitcher.switchToNextFolder();
+    }
+
     async _waitForGraceReconnect(timeoutMs = WS_RECONNECT_WAIT_MS) {
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {

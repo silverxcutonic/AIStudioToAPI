@@ -285,6 +285,30 @@ class AuthSwitcher {
             } catch (error) {
                 let userMessage = `❌ Fatal error: Unknown switching error occurred: ${error.message}`;
 
+                // If all accounts in the current folder failed/exhausted and autoSwitchFolders is on, try next folder
+                if (
+                    this.config.autoSwitchFolders &&
+                    (error.message.includes("All accounts failed") || error.message.includes("Fallback failed reason"))
+                ) {
+                    const folders = this.authSource.listAvailableFolders();
+                    if (folders.length > 1) {
+                        this.logger.warn(
+                            `⚠️ [Auth] All accounts in current folder "${this.authSource.activeFolder}" failed. Attempting failover to next folder...`
+                        );
+                        try {
+                            const folderResult = await this.switchToNextFolder();
+                            if (folderResult.success) {
+                                const folderMsg = `🗂️ Failover successful: Switched to folder "${folderResult.folder}", active account #${folderResult.newIndex}.`;
+                                this.logger.info(`[Auth] ${folderMsg}`);
+                                if (sendErrorCallback) sendErrorCallback(folderMsg);
+                                return;
+                            }
+                        } catch (folderErr) {
+                            this.logger.error(`[Auth] Inter-folder failover also failed: ${folderErr.message}`);
+                        }
+                    }
+                }
+
                 if (error.message.includes("Only one account is available")) {
                     userMessage = "❌ Switch failed: Only one account available.";
                     this.logger.info("[Auth] Only one account available, failure count reset.");
@@ -301,7 +325,95 @@ class AuthSwitcher {
         }
     }
 
-    incrementUsageCount() {
+    /**
+     * Switch active auth folder and launch initial context from the new folder
+     * @param {string} folderName - Name of the target auth folder (e.g., "auth1", "auth2")
+     * @param {number|null} targetIndex - Optional specific account index inside the new folder
+     */
+    async switchFolder(folderName, targetIndex = null) {
+        if (this.isSystemBusy) {
+            this.logger.info("🔄 [Auth] System busy, skipping folder switch");
+            return { reason: "Operation already in progress.", success: false };
+        }
+
+        this.isSystemBusy = true;
+        try {
+            this.logger.info("==================================================");
+            this.logger.info(`🗂️ [Auth] Initiating folder switch to "configs/${folderName}/"...`);
+            this.logger.info("==================================================");
+
+            // 1. Close all active contexts from previous folder
+            await this.browserManager.closeAllContextsForFolderSwitch();
+
+            // 2. Switch active folder in AuthSource and reload accounts
+            this.authSource.setActiveFolder(folderName);
+
+            const available = this.authSource.getRotationIndices();
+            if (available.length === 0) {
+                this.logger.warn(`[Auth] No available accounts found in folder "${folderName}".`);
+                this.resetCounters();
+                return {
+                    folder: folderName,
+                    newIndex: -1,
+                    success: true,
+                    totalAccounts: 0,
+                };
+            }
+
+            // 3. Pick starting account in the new folder
+            let startAccount = available[0];
+            if (Number.isInteger(targetIndex) && this.authSource.availableIndices.includes(targetIndex)) {
+                startAccount = targetIndex;
+            }
+
+            // 4. Launch context for the starting account
+            this.logger.info(`[Auth] Booting starting account #${startAccount} in folder "${folderName}"...`);
+            await this.browserManager.launchOrSwitchContext(startAccount);
+            this.resetCounters();
+
+            // 5. Preload background context pool if maxContexts > 1
+            this.browserManager.rebalanceContextPool().catch(err => {
+                this.logger.error(`[Auth] Background rebalance failed after folder switch: ${err.message}`);
+            });
+
+            this.logger.info(
+                `✅ [Auth] Successfully switched to folder "${folderName}", active account #${startAccount}.`
+            );
+            return {
+                folder: folderName,
+                newIndex: startAccount,
+                success: true,
+                totalAccounts: available.length,
+            };
+        } catch (error) {
+            this.logger.error(`❌ [Auth] Folder switch to "${folderName}" failed: ${error.message}`);
+            throw error;
+        } finally {
+            this.isSystemBusy = false;
+        }
+    }
+
+    /**
+     * Switch to the next available auth folder in rotation
+     */
+    async switchToNextFolder() {
+        const folders = this.authSource.listAvailableFolders();
+        if (folders.length <= 1) {
+            this.logger.warn("[Auth] No alternative folders available to switch to.");
+            return { reason: "No alternative folders available.", success: false };
+        }
+
+        const currentFolderIndex = folders.findIndex(f => f.name === this.authSource.activeFolder);
+        const nextFolderIndex = (currentFolderIndex + 1) % folders.length;
+        const nextFolder = folders[nextFolderIndex].name;
+
+        this.logger.info(
+            `🔄 [Auth] Escalating: Auto-switching from folder "${this.authSource.activeFolder}" to next folder "${nextFolder}"...`
+        );
+        return await this.switchFolder(nextFolder);
+    }
+
+    incrementUsage() {
         this.usageCount++;
         return this.usageCount;
     }

@@ -20,8 +20,12 @@ class ConfigLoader {
 
     loadConfiguration() {
         const config = {
+            activeAuthFolder: process.env.ACTIVE_AUTH_FOLDER || "auth1",
             apiKeys: [],
             apiKeySource: "Not set",
+            autoSwitchFolders: process.env.AUTO_SWITCH_FOLDERS
+                ? process.env.AUTO_SWITCH_FOLDERS.toLowerCase() === "true"
+                : true,
             browserExecutablePath: null,
             checkUpdate: true,
             enableAuthUpdate: true,
@@ -45,7 +49,12 @@ class ConfigLoader {
             wsPort: 9998,
         };
 
-        // Environment variable overrides
+        if (process.env.ACTIVE_AUTH_FOLDER) {
+            config.activeAuthFolder = process.env.ACTIVE_AUTH_FOLDER.trim();
+        }
+        if (process.env.AUTO_SWITCH_FOLDERS !== undefined) {
+            config.autoSwitchFolders = process.env.AUTO_SWITCH_FOLDERS.toLowerCase() === "true";
+        }
         if (process.env.PORT) {
             const parsed = parseInt(process.env.PORT, 10);
             config.httpPort = Number.isFinite(parsed) ? parsed : config.httpPort;
@@ -207,6 +216,8 @@ class ConfigLoader {
         this.logger.info(`  Check Update: ${config.checkUpdate}`);
         this.logger.info(`  Default Safety Threshold: ${config.safetySettingsThreshold}`);
         this.logger.info(`  Auto Update Auth: ${config.enableAuthUpdate}`);
+        this.logger.info(`  Active Auth Folder: ${config.activeAuthFolder}`);
+        this.logger.info(`  Auto Switch Folders on Quota Exhaustion: ${config.autoSwitchFolders}`);
         this.logger.info(`  Usage Stats: ${config.enableUsageStats}`);
         this.logger.info(`  Max Contexts: ${config.maxContexts === 0 ? "Unlimited" : config.maxContexts}`);
         this.logger.info(
