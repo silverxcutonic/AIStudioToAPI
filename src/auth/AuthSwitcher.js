@@ -413,9 +413,13 @@ class AuthSwitcher {
         return await this.switchFolder(nextFolder);
     }
 
-    incrementUsage() {
+    incrementUsageCount() {
         this.usageCount++;
         return this.usageCount;
+    }
+
+    incrementUsage() {
+        return this.incrementUsageCount();
     }
 
     shouldSwitchByUsage() {

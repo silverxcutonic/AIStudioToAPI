@@ -1,0 +1,25 @@
+services:
+  aistudio-to-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aistudio-to-api
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    environment:
+      - NODE_ENV=production
+      - PORT=7860
+      - HOST=0.0.0.0
+      - TZ=UTC
+    env_file:
+      - .env
+    volumes:
+      - ./configs/auth:/app/configs/auth
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const port = process.env.PORT || 7860; require('http').get('http://localhost:' + port + '/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)}).on('error', () => process.exit(1));\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
